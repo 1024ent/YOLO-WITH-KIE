@@ -304,7 +304,7 @@ plt.show()
 dataset_video_path = os.path.join('Pothole_Segmentation_YOLOv8', 'sample_video.mp4')
 
 # Define the destination path in the working directory
-video_path = 'Pothole_Segmentation_YOLOv8\output_video.mp4'
+video_path = 'Working/sample_video.mp4'
 
 # Copy the video file from its original location in the dataset to the current working directory
 shutil.copyfile(dataset_video_path, video_path)
@@ -331,3 +331,177 @@ while cap.isOpened():
 cap.release()
 cv2.destroyAllWindows()
 
+# Export the model
+best_model.export(format='onnx')
+
+# Define the path to the validation images
+valid_images_path = os.path.join(dataset_path, 'valid', 'images')
+
+# List all jpg images in the directory
+image_files = [file for file in os.listdir(valid_images_path) if file.endswith('.jpg')]
+
+# Select a sample image
+selected_image = image_files[45]
+
+# Perform inference on the selected image
+image_path = os.path.join(valid_images_path, selected_image)
+results = best_model.predict(source=image_path, imgsz=640, conf=0.5)
+annotated_image = results[0].plot()
+annotated_image_rgb = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB)
+
+# Determine the number of subplots needed (1 original + number of masks)
+num_subplots = 1 + (len(results[0].masks.data) if results[0].masks is not None else 0)
+
+# Initialize the subplot with 1 row and n columns
+fig, axes = plt.subplots(1, num_subplots, figsize=(15, 5))
+
+# Display the original annotated image
+axes[0].imshow(annotated_image_rgb)
+axes[0].set_title('Original Image')
+axes[0].axis('off')
+
+# If multiple masks, iterate and display each mask
+if results[0].masks is not None:
+    masks = results[0].masks.data.cpu().numpy()
+    for i, mask in enumerate(masks):
+        # Threshold the mask to make sure it's binary
+        # Any value greater than 0 is set to 255, else it remains 0
+        binary_mask = (mask > 0).astype(np.uint8) * 255
+        axes[i+1].imshow(binary_mask, cmap='gray')
+        axes[i+1].set_title(f'Segmented Mask {i+1}')
+        axes[i+1].axis('off')
+
+# Adjust layout and display the subplot
+plt.tight_layout()
+plt.show()
+
+# Initialize variables to hold total area and individual areas
+total_area = 0
+area_list = []
+
+# Set up the subplot for displaying masks
+fig, axes = plt.subplots(1, len(masks), figsize=(12, 8))
+
+# Perform operations if masks are available
+if results[0].masks is not None:
+    masks = results[0].masks.data.cpu().numpy()   # Retrieve masks as numpy arrays
+    image_area = masks.shape[1] * masks.shape[2]  # Calculate total number of pixels in the image
+    for i, mask in enumerate(masks):
+        binary_mask = (mask > 0).astype(np.uint8) * 255  # Convert mask to binary
+        color_mask = cv2.cvtColor(binary_mask, cv2.COLOR_GRAY2BGR)  # Convert binary mask to color
+        contours, _ = cv2.findContours(binary_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)  # Find contours in the binary mask
+        contour = contours[0]  # Retrieve the first contour
+        area = cv2.contourArea(contour)  # Calculate the area of the pothole
+        area_list.append(area)  # Append area to the list
+        cv2.drawContours(color_mask, [contour], -1, (0, 255, 0), 3)  # Draw the contour on the mask
+
+        # Display the mask with the green contour
+        axes[i].imshow(color_mask)
+        axes[i].set_title(f'Pothole {i+1}')
+        axes[i].axis('off')
+
+# Display all masks
+plt.tight_layout()
+plt.show()
+
+# Calculate and print areas after displaying the images
+for i, area in enumerate(area_list):
+    print(f"Area of Pothole {i+1}: {area} pixels")  
+    total_area += area  # Sum the areas for total
+
+# Calculate and print the total damaged area and percentage of road damaged by potholes
+print("-"*50)
+print(f"Total Damaged Area by Potholes: {total_area} pixels")
+print(f"Total Pixels in Image: {image_area} pixels")
+print(f"Percentage of Road Damaged: {(total_area / image_area) * 100:.2f}%")
+
+# Define the video path
+video_path = 'Working/sample_video.mp4'
+
+# Define font, scale, colors, and position for the annotation
+font = cv2.FONT_HERSHEY_SIMPLEX
+font_scale = 1
+text_position = (40, 80)
+font_color = (255, 255, 255)    # White color for text
+background_color = (0, 0, 255)  # Red background for text
+
+# Initialize a deque with fixed length for averaging the last 10 percentage damages
+damage_deque = deque(maxlen=10)
+
+# Open the video
+cap = cv2.VideoCapture(video_path)
+
+# Define the codec and create VideoWriter object
+fourcc = cv2.VideoWriter_fourcc(*'XVID')
+out = cv2.VideoWriter('road_damage_assessment.avi', fourcc, 20.0, (int(cap.get(3)), int(cap.get(4))))
+
+# Read until video is completed
+while cap.isOpened():
+     # Capture frame-by-frame
+    ret, frame = cap.read()
+    if ret:
+        # Perform inference on the frame
+        results = best_model.predict(source=frame, imgsz=640, conf=0.25)
+        processed_frame = results[0].plot(boxes=False)
+        
+        # Initializes percentage_damage to 0
+        percentage_damage = 0 
+        
+        # If masks are available, calculate total damage area and percentage
+        if results[0].masks is not None:
+            total_area = 0
+            masks = results[0].masks.data.cpu().numpy()
+            image_area = frame.shape[0] * frame.shape[1]  # total number of pixels in the image
+            for mask in masks:
+                binary_mask = (mask > 0).astype(np.uint8) * 255
+                contour, _ = cv2.findContours(binary_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                total_area += cv2.contourArea(contour[0])
+            
+            percentage_damage = (total_area / image_area) * 100
+
+        # Calculate and update the percentage damage
+        damage_deque.append(percentage_damage)
+        smoothed_percentage_damage = sum(damage_deque) / len(damage_deque)
+            
+        # Draw a thick line for text background
+        cv2.line(processed_frame, (text_position[0], text_position[1] - 10),
+                 (text_position[0] + 350, text_position[1] - 10), background_color, 40)
+        
+        # Annotate the frame with the percentage of damage
+        cv2.putText(processed_frame, f'Road Damage: {smoothed_percentage_damage:.2f}%', text_position, font, font_scale, font_color, 2, cv2.LINE_AA)         
+    
+        # Write the processed frame to the output video
+        out.write(processed_frame)
+        
+        # Uncomment the following 3 lines if running this code on a local machine to view the real-time processing results
+        # cv2.imshow('Road Damage Assessment', processed_frame) # Display the processed frame
+        # if cv2.waitKey(1) & 0xFF == ord('q'): # Press Q on keyboard to exit the loop
+        #     break 
+    else:
+        break
+
+# Release the video capture and video write objects
+cap.release()
+out.release()
+
+# Close all the frames
+cv2.destroyAllWindows()
+
+# Convert the .avi video generated by the YOLOv8 prediction to .mp4 format for compatibility
+result_video_path = 'result_video.mp4'
+os.system(f'ffmpeg -y -loglevel panic -i "runs/segment/predict/sample_video.avi" "{result_video_path}"')
+
+# Display the processed sample video using OpenCV or an appropriate method in your local environment
+# Note: Replace this part with your preferred method of displaying video, as this code may not be directly executable in all environments.
+cap_result = cv2.VideoCapture(result_video_path)
+
+while cap_result.isOpened():
+    ret, frame = cap_result.read()
+    if not ret:
+        break
+    cv2.imshow('Result Video', frame)
+    if cv2.waitKey(25) & 0xFF == ord('q'):  # Press 'q' to exit
+        break
+
+cap_result.release()
+cv2.destroyAllWindows()
